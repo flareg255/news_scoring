@@ -1,0 +1,32 @@
+# === プロジェクト固有 ===
+# ドキュメント・ルール（社内情報）
+docs/
+RULES.md
+
+# 定数ファイル（APIキーや設定値を含む可能性があるため）
+**/*constants.py
+**/*const.py
+
+# 収集データ・モデル（容量大のため）
+data/
+models/
+
+# === Python ===
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# === 環境変数 ===
+.env
+.env.*
+
+# === エディタ・OS ===
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
