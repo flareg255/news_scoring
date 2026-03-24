@@ -13,7 +13,6 @@ class RssArticle:
     url: str
     source: str
     published_at: Optional[datetime]
-    summary: Optional[str]
 
 
 class RssFetcher:
@@ -42,7 +41,6 @@ class RssFetcher:
                 url=entry.get("link", ""),
                 source=feed.feed.get("title", feed_url),
                 published_at=published_at,
-                summary=entry.get("summary", None),
             ))
 
         return articles
