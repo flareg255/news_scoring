@@ -35,7 +35,9 @@ def phase0_collect():
 
     # クローリング（crawl4aiで本文取得 → data/raw/ にMarkdown保存）
     crawler = ArticleCrawler(db=db)
-    crawler.crawl_all(limit=50)
+    uncrawled_count = stats['total'] - stats['crawled']
+    if uncrawled_count > 0:
+        crawler.crawl_all(limit=uncrawled_count)
 
     return articles
 
