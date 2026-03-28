@@ -13,6 +13,7 @@ from src.storage.db_manager import DbManager
 from src.crawler.article_crawler import ArticleCrawler
 from pathlib import Path
 from src.cleaner.text_cleaner import clean_markdown_text
+from src.labeling.llm_labeler import get_emotion_scores_from_lmstudio
 
 setup()
 logger = get_logger(__name__)
@@ -55,7 +56,7 @@ def phase1_label():
     logger.info("=== フェーズ1: テキストのクリーニング検証（デバッグモード） ===")
     
     db = DbManager()
-    unlabeled_rows = db.get_unlabeled(limit=30)  # テスト用に最新30件を取得
+    unlabeled_rows = db.get_unlabeled(limit=None)  # 制限を完全に解除し、本当にすべてを取得
     
     if not unlabeled_rows:
         logger.info("ラベリング対象の記事がありません")
@@ -76,16 +77,22 @@ def phase1_label():
         # クリーニング実行
         cleaned_text = clean_markdown_text(raw_text)
         
-        # デバッグフォルダに書き込み
-        file_name = Path(content_path).name
-        debug_path = debug_dir / file_name
+        # 2. LM Studio 定数設定のモデルを呼び出し、感情スコアを取得
+        scores = get_emotion_scores_from_lmstudio(cleaned_text)
         
-        with open(debug_path, "w", encoding="utf-8") as f:
-            f.write(cleaned_text)
+        if scores is not None:
+            # 3. 取得したスコアをDBに保存し、is_labeled を 1 に更新
+            db.mark_labeled(
+                row["id"], 
+                scores["anger"], scores["sadness"], scores["joy"],
+                scores["fear"], scores["disgust"], scores["surprise"]
+            )
+            count += 1
+            logger.info(f"ラベリング成功 [ID:{row['id']}] 喜:{scores['joy']} 怒:{scores['anger']} 悲:{scores['sadness']} 恐:{scores['fear']} 嫌:{scores['disgust']} 驚:{scores['surprise']}")
+        else:
+            logger.warning(f"ラベリング失敗 [ID:{row['id']}]")
             
-        count += 1
-        
-    logger.info(f"{count} 件のクリーニング結果を {debug_dir} に出力しました。エディタの機能で差分を確認してください。")
+    logger.info(f"Phase 1 完了: {count} 件の記事に感情スコアを付与しました！")
 
 
 def phase2_train():

@@ -47,7 +47,8 @@ class ArticleCrawler:
             # ユーザー提案の最適化: クローラーの段階でヘッダー・フッター・ナビゲーション・iframe等を除外する
             config = CrawlerRunConfig(
                 cache_mode=CacheMode.BYPASS,
-                excluded_tags=['header', 'footer', 'nav', 'aside', 'form', 'iframe'],
+                exclude_external_images=True,
+                excluded_tags=['header', 'footer', 'nav', 'aside', 'form', 'iframe', 'title', 'meta'],
                 markdown_generator=DefaultMarkdownGenerator(
                     content_filter=PruningContentFilter(
                         threshold=0.4, 
