@@ -4,6 +4,8 @@ from datetime import datetime
 from pathlib import Path
 
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+from crawl4ai.content_filter_strategy import PruningContentFilter
 
 from src.storage.db_manager import DbManager
 
@@ -42,7 +44,18 @@ class ArticleCrawler:
         success = 0
 
         async with AsyncWebCrawler() as crawler:
-            config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+            # ユーザー提案の最適化: クローラーの段階でヘッダー・フッター・ナビゲーション・iframe等を除外する
+            config = CrawlerRunConfig(
+                cache_mode=CacheMode.BYPASS,
+                excluded_tags=['header', 'footer', 'nav', 'aside', 'form', 'iframe'],
+                markdown_generator=DefaultMarkdownGenerator(
+                    content_filter=PruningContentFilter(
+                        threshold=0.4, 
+                        threshold_type="dynamic", 
+                        min_word_threshold=50
+                    )
+                )
+            )
             for article in articles:
                 ok = await self._crawl_one(crawler, config, article)
                 if ok:

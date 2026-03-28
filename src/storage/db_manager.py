@@ -1,5 +1,8 @@
 import sqlite3
-from datetime import datetime
+import os
+import zipfile
+from collections import defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -125,3 +128,61 @@ class DbManager:
                 "SELECT COUNT(*) FROM articles WHERE is_labeled = 1"
             ).fetchone()[0]
         return {"total": total, "crawled": crawled, "labeled": labeled}
+
+    def archive_old_articles(self, retention_days: int = 90) -> dict:
+        """
+        指定日数（retention_days）以上経過した記事のMarkdownをZIP化し、実体ファイルを削除する。
+        DBのレコードは残し、content_path のみ NULL にクリアする。
+        """
+        threshold_date = (datetime.now() - timedelta(days=retention_days)).isoformat()
+        archive_dir = self.db_path.parent / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        archived_counts = {}
+
+        with self._connect() as conn:
+            # 削除・アーカイブ対象を取得
+            rows = conn.execute(
+                "SELECT id, fetched_at, content_path FROM articles WHERE fetched_at < ?",
+                (threshold_date,)
+            ).fetchall()
+
+            if not rows:
+                return archived_counts
+
+            # 月ごとにグループ化 (fetched_at のYYYY-MM)
+            by_month = defaultdict(list)
+            for row in rows:
+                if row["fetched_at"]:
+                    month_str = row["fetched_at"][:7]  # "YYYY-MM"
+                    by_month[month_str].append(row)
+
+            for month_str, articles in by_month.items():
+                zip_path = archive_dir / f"{month_str}.zip"
+                
+                # ZIPに追記
+                with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
+                    for article in articles:
+                        cpath = article["content_path"]
+                        if cpath and os.path.exists(cpath):
+                            # ZIP内でのファイル名
+                            arcname = os.path.basename(cpath)
+                            # 既に同一ファイル名がZIPにある場合の重複対策は上書きまたは無視（通常ID単位でファイル名が一意なら問題ない）
+                            if arcname not in zf.namelist():
+                                zf.write(cpath, arcname)
+                            try:
+                                os.remove(cpath)
+                            except OSError:
+                                pass
+                
+                # DBのレコードは残し、不要になった実体ファイルへのパスのみクリアする
+                ids = [a["id"] for a in articles]
+                chunk_size = 900 # SQLiteのプレースホルダ上限を考慮
+                for i in range(0, len(ids), chunk_size):
+                    chunk = ids[i:i+chunk_size]
+                    placeholders = ",".join("?" * len(chunk))
+                    conn.execute(f"UPDATE articles SET content_path = NULL WHERE id IN ({placeholders})", chunk)
+                
+                archived_counts[month_str] = len(ids)
+
+        return archived_counts
