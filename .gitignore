@@ -13,6 +13,7 @@ models/
 
 # === Python ===
 .venv/
+venv/
 __pycache__/
 *.py[cod]
 *.pyo
@@ -30,3 +31,4 @@ build/
 .idea/
 *.DS_Store
 Thumbs.db
+logs/
