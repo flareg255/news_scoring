@@ -8,15 +8,18 @@ def clean_markdown_text(raw_text: str) -> str:
     """
     lines = raw_text.split('\n')
     cleaned_lines = []
+    seen_lines = set()
     
-    # これ以降の文が出現したら記事の終わりとみなして切り捨てる（フッター等の足切りキーワード）
-    # 定数 (cleaner_constants.py) から読み込む
+    # メタデータブロックの中かどうか判定フラグ
+    in_header = True
     
     for line in lines:
         stripped = line.strip()
         
-        # 1. クローラーが付与した上部のメタデータの削除
-        if stripped.startswith(("source:", "url:", "published_at:", "fetched_at:")) or stripped == "---":
+        # 1. クローラーが付与した上部のメタデータ（--- で囲まれた部分）を丸ごとスキップ
+        if in_header:
+            if stripped == "---":
+                in_header = False
             continue
             
         # 2. 足切りキーワードの判定
@@ -32,8 +35,8 @@ def clean_markdown_text(raw_text: str) -> str:
         # 3. 画像タグの削除 ![alt](url) -> 完全削除
         line = re.sub(r'!\[.*?\]\(.*?\)', '', line)
         
-        # 4. リンクタグのテキスト化 [text](url) -> text
-        line = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', line)
+        # 4. リンクタグのテキスト化 [text](url) -> text (空文字も許容)
+        line = re.sub(r'\[([^\]]*)\]\([^\)]+\)', r'\1', line)
         
         # 5. HTMLタグの除去
         line = re.sub(r'<[^>]+>', '', line)
@@ -42,6 +45,12 @@ def clean_markdown_text(raw_text: str) -> str:
         if not stripped:
             cleaned_lines.append("")
             continue
+            
+        # 5.5 長めの文の完全重複はノイズ（ニュースメディア特有の見出しとリード文の２重出力など）としてスキップ
+        if len(stripped) > 15:
+            if stripped in seen_lines:
+                continue
+            seen_lines.add(stripped)
             
         # 6. 「短すぎる＆リンクしかない」ようなナビゲーション行のフィルタ
         # （15文字未満で読点や句点、カギ括弧などがなく、見出しでもない短いテキストはメニューとみなす）

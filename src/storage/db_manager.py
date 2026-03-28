@@ -41,9 +41,20 @@ class DbManager:
                     content_path TEXT,
                     anger        REAL,
                     sadness      REAL,
-                    joy          REAL
+                    joy          REAL,
+                    fear         REAL,
+                    disgust      REAL,
+                    surprise     REAL
                 )
             """)
+            
+            # 既存のデータベースを使っている場合のための自動マイグレーション
+            try:
+                conn.execute("ALTER TABLE articles ADD COLUMN fear REAL")
+                conn.execute("ALTER TABLE articles ADD COLUMN disgust REAL")
+                conn.execute("ALTER TABLE articles ADD COLUMN surprise REAL")
+            except sqlite3.OperationalError:
+                pass # カラムが既に存在する場合のエラーは無視する
 
     def save_articles(self, articles: list[RssArticle]) -> int:
         """
@@ -87,13 +98,18 @@ class DbManager:
                 "SELECT * FROM articles WHERE is_crawled = 0 LIMIT ?", (limit,)
             ).fetchall()
 
-    def get_unlabeled(self, limit: int = 100) -> list[sqlite3.Row]:
+    def get_unlabeled(self, limit: Optional[int] = 100) -> list[sqlite3.Row]:
         """感情スコア未付与の記事（本文取得完了済み）を取得する"""
         with self._connect() as conn:
-            return conn.execute(
-                "SELECT * FROM articles WHERE is_crawled = 1 AND is_labeled = 0 LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if limit is not None:
+                return conn.execute(
+                    "SELECT * FROM articles WHERE is_crawled = 1 AND is_labeled = 0 LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                return conn.execute(
+                    "SELECT * FROM articles WHERE is_crawled = 1 AND is_labeled = 0"
+                ).fetchall()
 
     def mark_crawled(self, article_id: int, content_path: str) -> None:
         """本文取得完了をマークする"""
@@ -104,17 +120,18 @@ class DbManager:
             )
 
     def mark_labeled(
-        self, article_id: int, anger: float, sadness: float, joy: float
+        self, article_id: int, anger: float, sadness: float, joy: float,
+        fear: float, disgust: float, surprise: float
     ) -> None:
         """感情スコア付与完了をマークする"""
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE articles
-                SET is_labeled = 1, anger = ?, sadness = ?, joy = ?
+                SET is_labeled = 1, anger = ?, sadness = ?, joy = ?, fear = ?, disgust = ?, surprise = ?
                 WHERE id = ?
                 """,
-                (anger, sadness, joy, article_id),
+                (anger, sadness, joy, fear, disgust, surprise, article_id),
             )
 
     def stats(self) -> dict:
