@@ -1,7 +1,11 @@
 import json
 import urllib.request
+import urllib.error
 from typing import Dict, Optional
 from src.labeling.labeling_constants import LMSTUDIO_API_URL, LMSTUDIO_MODEL_NAME
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 def get_emotion_scores_from_lmstudio(text: str, model_name: str = LMSTUDIO_MODEL_NAME) -> Optional[Dict[str, float]]:
     """
@@ -54,8 +58,11 @@ def get_emotion_scores_from_lmstudio(text: str, model_name: str = LMSTUDIO_MODEL
             # OpenAI互換APIのレスポンス構造からテキストを抽出
             response_text = result["choices"][0]["message"]["content"]
             
+            # AIが指示を無視して ```json ... ``` と出力してきた場合の自己修復
+            cleaned_response = response_text.replace("```json", "").replace("```", "").strip()
+            
             # JSON文字列をPythonの辞書に変換
-            scores = json.loads(response_text)
+            scores = json.loads(cleaned_response)
             return {
                 "joy": float(scores.get("joy", 0)),
                 "anger": float(scores.get("anger", 0)),
@@ -64,6 +71,16 @@ def get_emotion_scores_from_lmstudio(text: str, model_name: str = LMSTUDIO_MODEL
                 "disgust": float(scores.get("disgust", 0)),
                 "surprise": float(scores.get("surprise", 0))
             }
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+        logger.error(f"[LLMエラー] LM Studioがリクエストを拒否しました (HTTP {e.code}): {error_body}")
+        return None
+    except urllib.error.URLError as e:
+        logger.error(f"[LLMエラー] LM Studioに接続できません。Local Serverが開始されているか確認してください ({LMSTUDIO_API_URL}): {e.reason}")
+        return None
+    except json.decoder.JSONDecodeError as e:
+        logger.error(f"[LLMエラー] APIは成功しましたが、AIの出力が不正なJSONでした: {e}")
+        return None
     except Exception as e:
-        print(f"[LLMエラー] LM Studioの通信またはJSONパースに失敗しました: {e}")
+        logger.error(f"[LLMエラー] 予期せぬエラーが発生しました: {e}")
         return None
