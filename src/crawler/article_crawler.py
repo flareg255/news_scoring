@@ -8,6 +8,9 @@ from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.content_filter_strategy import PruningContentFilter
 
 from src.storage.db_manager import DbManager
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 RAW_DIR = Path("data/raw")
 
@@ -37,10 +40,10 @@ class ArticleCrawler:
     async def _crawl_all_async(self, limit: int) -> int:
         articles = self.db.get_uncrawled(limit=limit)
         if not articles:
-            print("[Crawler] 未クロール記事なし")
+            logger.info("[Crawler] 未クロール記事なし")
             return 0
 
-        print(f"[Crawler] {len(articles)}件をクロール開始")
+        logger.info(f"[Crawler] {len(articles)}件をクロール開始")
         success = 0
 
         async with AsyncWebCrawler() as crawler:
@@ -63,7 +66,7 @@ class ArticleCrawler:
                     success += 1
                 await asyncio.sleep(self.interval)
 
-        print(f"[Crawler] 完了: {success}/{len(articles)}件成功")
+        logger.info(f"[Crawler] 完了: {success}/{len(articles)}件成功")
         return success
 
     async def _crawl_one(self, crawler, config, article) -> bool:
@@ -81,7 +84,7 @@ class ArticleCrawler:
             result = await crawler.arun(url=url, config=config)
 
             if not result.success:
-                print(f"[Crawler] SKIP (取得失敗) id={article_id} {url}")
+                logger.warning(f"[Crawler] SKIP (取得失敗) id={article_id} {url}")
                 return False
 
             # crawl4ai新旧API両対応:
@@ -93,7 +96,7 @@ class ArticleCrawler:
             md = str(md).strip() if md else ""
 
             if not md:
-                print(f"[Crawler] SKIP (本文なし) id={article_id} {url}")
+                logger.warning(f"[Crawler] SKIP (本文なし) id={article_id} {url}")
                 return False
 
             # Markdownファイルを保存
@@ -109,11 +112,11 @@ class ArticleCrawler:
 
             # DBにクロール完了をマーク
             self.db.mark_crawled(article_id, content_path)
-            print(f"[Crawler] OK id={article_id} {url}")
+            logger.info(f"[Crawler] OK id={article_id} {url}")
             return True
 
         except Exception:
-            print(f"[Crawler] ERROR id={article_id} {url}")
+            logger.error(f"[Crawler] ERROR id={article_id} {url}")
             traceback.print_exc()
             return False
 

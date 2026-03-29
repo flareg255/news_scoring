@@ -4,6 +4,9 @@ from datetime import datetime
 from typing import Optional
 
 from src.rss.rss_constants import RssConstants
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -57,8 +60,8 @@ class RssFetcher:
             try:
                 articles = self.fetch(feed_url)
                 all_articles.extend(articles)
-                print(f"[OK] {feed_url} -> {len(articles)}件取得")
+                logger.info(f"[OK] {feed_url} -> {len(articles)}件取得")
             except Exception as e:
-                print(f"[ERROR] {feed_url} -> {e}")
+                logger.error(f"[ERROR] {feed_url} -> {e}")
 
         return all_articles
