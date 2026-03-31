@@ -1,86 +1,93 @@
 import json
+import re
 import urllib.request
 import urllib.error
-from typing import Dict, Optional
 from src.labeling.labeling_constants import LMSTUDIO_API_URL, LMSTUDIO_MODEL_NAME
 from src.logger import get_logger
 
 logger = get_logger(__name__)
 
-def get_emotion_scores_from_lmstudio(text: str, model_name: str = LMSTUDIO_MODEL_NAME) -> Optional[Dict[str, float]]:
-    """
-    ローカルで稼働している LM Studio (デフォルトポート 1234) を呼び出し、
-    指定したモデルに感情をJSONで出力させる関数。OpenAI互換APIを使用します。
-    """
-    url = LMSTUDIO_API_URL
-    
-    # 完全にJSONだけを吐き出させるための強固なプロンプト
-    prompt = f"""あなたはニュース記事の感情分析AIです。
-以下のニュース記事を読み、そこから読み取れる基本的な6つの感情「喜び(joy)」「怒り(anger)」「悲しみ(sadness)」「恐れ(fear)」「嫌悪(disgust)」「驚き(surprise)」を、それぞれ 0〜10 の整数値で評価してください。
-出力は「必ず以下のJSON形式のみ」とし、前置きやMarkdownの装飾(```jsonなど)は一切含めないでください。
 
-{{
-    "joy": 5,
-    "anger": 3,
-    "sadness": 0,
-    "fear": 0,
-    "disgust": 0,
-    "surprise": 0
-}}
+class LlmLabeler:
+    """
+    LM Studio（OpenAI互換API）を呼び出し、ニュース記事の感情スコアを取得するクラス。
+    """
+
+    PROMPT_TEMPLATE = """\
+あなたはニュース記事の感情分析AIです。
+以下の記事を読み、6つの感情（喜び・怒り・悲しみ・恐れ・嫌悪・驚き）をそれぞれ0〜10の整数で評価してください。
+記事が日本語・英語・数字やテーブルのみで構成されている場合でも、必ず以下の形式で出力してください。
+
+【出力形式】（必ずこの2行のみ）
+1行目: JSONオブジェクト（Markdownの装飾なし、1行で）
+2行目: 採点の根拠を1文で（日本語）
+
+例:
+{{"joy": 0, "anger": 0, "sadness": 0, "fear": 0, "disgust": 0, "surprise": 0}}
+この記事は中立的な事実報告で、強い感情は読み取れない。
 
 【ニュース記事】
-{text}
-"""
+{text}"""
 
-    # LM Studioが準拠している「OpenAI互換API形式」でのデータ作成
-    data = {
-        "model": model_name,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "temperature": 0.0,
-        "response_format": { "type": "json_object" }  # LM StudioにJSONとしての回答を強制
-    }
-    
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(data).encode("utf-8"),
-        headers={"Content-Type": "application/json"}
-    )
-    
-    try:
-        with urllib.request.urlopen(req) as response:
-            result = json.loads(response.read().decode("utf-8"))
-            
-            # OpenAI互換APIのレスポンス構造からテキストを抽出
-            response_text = result["choices"][0]["message"]["content"]
-            
-            # AIが指示を無視して ```json ... ``` と出力してきた場合の自己修復
-            cleaned_response = response_text.replace("```json", "").replace("```", "").strip()
-            
-            # JSON文字列をPythonの辞書に変換
-            scores = json.loads(cleaned_response)
-            return {
-                "joy": float(scores.get("joy", 0)),
-                "anger": float(scores.get("anger", 0)),
-                "sadness": float(scores.get("sadness", 0)),
-                "fear": float(scores.get("fear", 0)),
-                "disgust": float(scores.get("disgust", 0)),
-                "surprise": float(scores.get("surprise", 0))
-            }
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8")
-        logger.error(f"[LLMエラー] LM Studioがリクエストを拒否しました (HTTP {e.code}): {error_body}")
-        return None
-    except urllib.error.URLError as e:
-        logger.error(f"[LLMエラー] LM Studioに接続できません。Local Serverが開始されているか確認してください ({LMSTUDIO_API_URL}): {e.reason}")
-        return None
-    except json.decoder.JSONDecodeError as e:
-        logger.error(f"[LLMエラー] APIは成功しましたが、AIの出力が不正なJSONでした: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"[LLMエラー] 予期せぬエラーが発生しました: {e}")
-        return None
+    def __init__(self, api_url: str = LMSTUDIO_API_URL, model_name: str = LMSTUDIO_MODEL_NAME):
+        self.api_url = api_url
+        self.model_name = model_name
+
+    def label(self, text: str):
+        """
+        テキストを感情分析し、スコアとAIの生出力を返す。
+
+        Returns:
+            (scores: dict | None, raw_response: str)
+        """
+        prompt = self.PROMPT_TEMPLATE.format(text=text)
+
+        data = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0
+        }
+
+        req = urllib.request.Request(
+            self.api_url,
+            data=json.dumps(data).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+
+        try:
+            with urllib.request.urlopen(req) as response:
+                result = json.loads(response.read().decode("utf-8"))
+
+                actual_model = result.get("model", "unknown")
+                logger.info(f"確認済モデル: {actual_model}")
+
+                response_text = result["choices"][0]["message"]["content"]
+
+                match = re.search(r'\{[^{}]+\}', response_text, re.DOTALL)
+                if not match:
+                    raise json.decoder.JSONDecodeError("No JSON object found in response", response_text, 0)
+                cleaned_response = match.group(0)
+
+                scores = json.loads(cleaned_response)
+                return {
+                    "joy":      float(scores.get("joy", 0)),
+                    "anger":    float(scores.get("anger", 0)),
+                    "sadness":  float(scores.get("sadness", 0)),
+                    "fear":     float(scores.get("fear", 0)),
+                    "disgust":  float(scores.get("disgust", 0)),
+                    "surprise": float(scores.get("surprise", 0))
+                }, response_text
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8")
+            logger.error(f"[LLMエラー] LM Studioがリクエストを拒否しました (HTTP {e.code}): {error_body}")
+            return None, ""
+        except urllib.error.URLError as e:
+            logger.error(f"[LLMエラー] LM Studioに接続できません ({self.api_url}): {e.reason}")
+            return None, ""
+        except json.decoder.JSONDecodeError as e:
+            raw = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            logger.error(f"[LLMエラー] AIの出力が不正なJSONでした: {e} | AIの生出力=''{raw[:200]}''")
+            return None, raw
+        except Exception as e:
+            logger.error(f"[LLMエラー] 予期せぬエラーが発生しました: {e}")
+            return None, ""

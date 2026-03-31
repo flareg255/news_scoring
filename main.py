@@ -12,8 +12,11 @@ from src.rss.rss_fetcher import RssFetcher
 from src.storage.db_manager import DbManager
 from src.crawler.article_crawler import ArticleCrawler
 from pathlib import Path
-from src.cleaner.text_cleaner import clean_markdown_text
-from src.labeling.llm_labeler import get_emotion_scores_from_lmstudio
+from src.cleaner.text_cleaner import TextCleaner
+from src.labeling.llm_labeler import LlmLabeler
+from src.labeling.labeling_constants import LMSTUDIO_API_URL
+from src.training.export_dataset import DatasetExporter
+from src.training.training_constants import TRAIN_JSONL_PATH
 
 setup()
 logger = get_logger(__name__)
@@ -54,8 +57,11 @@ def phase0_collect():
 def phase1_label():
     """フェーズ1: APIで感情スコアを付与する前のデバッグ・クリーニング処理"""
     logger.info("=== フェーズ1: テキストのクリーニング検証（デバッグモード） ===")
+    logger.info(f"エンドポイント: {LMSTUDIO_API_URL} | モデル名は最初のAPIレスポンスで確認")
     
     db = DbManager()
+    cleaner = TextCleaner()
+    labeler = LlmLabeler()
     unlabeled_rows = db.get_unlabeled(limit=None)  # 制限を完全に解除し、本当にすべてを取得
     
     if not unlabeled_rows:
@@ -75,10 +81,21 @@ def phase1_label():
             raw_text = f.read()
             
         # クリーニング実行
-        cleaned_text = clean_markdown_text(raw_text)
+        cleaned_text = cleaner.clean(raw_text)
+        
+        # デバッグ・品質確認用に、最終的にLLMに投げるテキストを保存
+        debug_file_path = debug_dir / f"{row['id']}.md"
+        with open(debug_file_path, "w", encoding="utf-8") as df:
+            df.write(cleaned_text)
         
         # 2. LM Studio 定数設定のモデルを呼び出し、感情スコアを取得
-        scores = get_emotion_scores_from_lmstudio(cleaned_text)
+        scores, raw_response = labeler.label(cleaned_text)
+        
+        # AIの生出力（根拠・無振りの山り小）をデバッグ用に保存
+        if raw_response:
+            reason_path = debug_dir / f"{row['id']}_reason.txt"
+            with open(reason_path, "w", encoding="utf-8") as rf:
+                rf.write(raw_response)
         
         if scores is not None:
             # 3. 取得したスコアをDBに保存し、is_labeled を 1 に更新
@@ -93,14 +110,20 @@ def phase1_label():
             logger.warning(f"ラベリング失敗 [ID:{row['id']}]")
             
     logger.info(f"Phase 1 完了: {count} 件の記事に感情スコアを付与しました！")
+    stats = db.stats()
+    logger.info(f"DB現在状況 → クロール済: {stats['crawled']}件 | ラベリング済: {stats['labeled']}件 | 未ラベリング: {stats['crawled'] - stats['labeled']}件")
 
 
 def phase2_train():
-    """フェーズ2: ローカルLLMをLoRAでファインチューニングする"""
-    logger.info("=== フェーズ2: LoRAファインチューニング開始 ===")
-    # TODO: data/labeled/ のデータを使ってLoRAファインチューニング
-    # TODO: 学習済みモデルを models/ に保存
-    pass
+    """フェーズ2: 教師データをエクスポートし、LM StudioでLoRAファインチューニングを行う"""
+    logger.info("=== フェーズ2: 教師データエクスポート開始 ===")
+    exporter = DatasetExporter()
+    count = exporter.export()
+    logger.info(f"エクスポート完了: {count} 件 → {TRAIN_JSONL_PATH}")
+    logger.info("【次のステップ】LM Studio (Windows) の Train タブで以下を設定して学習を実行してください:")
+    logger.info(f"  - Dataset: {TRAIN_JSONL_PATH.resolve()}")
+    logger.info("  - Base Model: mistral-7b-instruct (Apache 2.0)")
+    logger.info("  - Epochs: 3, Learning Rate: 2e-4, LoRA Rank: 16")
 
 
 def phase3_rag():
@@ -114,6 +137,6 @@ def phase3_rag():
 if __name__ == "__main__":
     articles = phase0_collect()
     phase1_label()
-    # phase2_train()
+    phase2_train()
     # phase3_rag()
 
