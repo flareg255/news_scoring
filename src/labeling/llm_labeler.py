@@ -18,6 +18,10 @@ class LlmLabeler:
 以下の記事を読み、6つの感情（喜び・怒り・悲しみ・恐れ・嫌悪・驚き）をそれぞれ0〜10の整数で評価してください。
 記事が日本語・英語・数字やテーブルのみで構成されている場合でも、必ず以下の形式で出力してください。
 
+【評価の視点】
+特定の立場（当事者・専門家・活動家など）からではなく、**一般的な日本人読者が感じる平均的な感情反応**として評価してください。
+記事の文体・トーン・内容から読み取れる感情を客観的に判断してください。
+
 【出力形式】（必ずこの2行のみ）
 1行目: JSONオブジェクト（Markdownの装飾なし、1行で）
 2行目: 採点の根拠を1文で（日本語）
@@ -55,7 +59,7 @@ class LlmLabeler:
         )
 
         try:
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=60) as response:
                 result = json.loads(response.read().decode("utf-8"))
 
                 actual_model = result.get("model", "unknown")

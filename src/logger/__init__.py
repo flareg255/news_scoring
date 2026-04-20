@@ -47,6 +47,18 @@ def setup(level: int = logging.DEBUG) -> None:
     file_handler.setFormatter(logging.Formatter(fmt, datefmt))
     root.addHandler(file_handler)
 
+    # 未捕捉の例外をログに記録する（stderrに消えるのを防ぐ）
+    def _log_uncaught_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logging.getLogger("root").critical(
+            "未捕捉の例外が発生しました",
+            exc_info=(exc_type, exc_value, exc_traceback)
+        )
+
+    sys.excepthook = _log_uncaught_exception
+
     logging.getLogger(__name__).info(f"ログ出力先: {log_file}")
 
 

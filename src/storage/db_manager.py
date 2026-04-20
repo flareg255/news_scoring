@@ -134,6 +134,22 @@ class DbManager:
                 (anger, sadness, joy, fear, disgust, surprise, article_id),
             )
 
+    def reset_labels(self) -> int:
+        """全記事のラベルをリセットする（再採点用）。スコアもNULLに戻す。"""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE articles
+                SET is_labeled = 0, anger = NULL, sadness = NULL,
+                    joy = NULL, fear = NULL, disgust = NULL, surprise = NULL
+                WHERE is_labeled = 1
+                """
+            )
+            count = conn.execute(
+                "SELECT changes()"
+            ).fetchone()[0]
+        return count
+
     def stats(self) -> dict:
         """各フェーズの処理件数サマリーを返す"""
         with self._connect() as conn:
