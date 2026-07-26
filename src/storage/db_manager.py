@@ -11,6 +11,10 @@ from src.rss.rss_fetcher import RssArticle
 
 DB_PATH = Path("data/news_scoring.db")
 
+# ラベリングを諦めるまでの試行回数。これを超えた記事は get_unlabeled の対象から外れ、
+# 毎回の実行で無限にリトライされ続けるのを防ぐ。
+MAX_LABEL_ATTEMPTS = 5
+
 
 class DbManager:
     """SQLiteデータベースの管理クラス"""
@@ -44,17 +48,23 @@ class DbManager:
                     joy          REAL,
                     fear         REAL,
                     disgust      REAL,
-                    surprise     REAL
+                    surprise     REAL,
+                    label_fail_count INTEGER DEFAULT 0
                 )
             """)
-            
+
             # 既存のデータベースを使っている場合のための自動マイグレーション
-            try:
-                conn.execute("ALTER TABLE articles ADD COLUMN fear REAL")
-                conn.execute("ALTER TABLE articles ADD COLUMN disgust REAL")
-                conn.execute("ALTER TABLE articles ADD COLUMN surprise REAL")
-            except sqlite3.OperationalError:
-                pass # カラムが既に存在する場合のエラーは無視する
+            # （1カラムずつ試す。まとめてtryすると先頭で例外が出た時に残りが適用されない）
+            for column, ddl in (
+                ("fear", "REAL"),
+                ("disgust", "REAL"),
+                ("surprise", "REAL"),
+                ("label_fail_count", "INTEGER DEFAULT 0"),
+            ):
+                try:
+                    conn.execute(f"ALTER TABLE articles ADD COLUMN {column} {ddl}")
+                except sqlite3.OperationalError:
+                    pass  # カラムが既に存在する場合のエラーは無視する
 
     def save_articles(self, articles: list[RssArticle]) -> int:
         """
@@ -99,17 +109,56 @@ class DbManager:
             ).fetchall()
 
     def get_unlabeled(self, limit: Optional[int] = 100) -> list[sqlite3.Row]:
-        """感情スコア未付与の記事（本文取得完了済み）を取得する"""
+        """
+        感情スコア未付与の記事（本文取得完了済み）を取得する。
+        MAX_LABEL_ATTEMPTS 回以上失敗した記事は恒久的な失敗とみなして除外する。
+        """
+        sql = (
+            "SELECT * FROM articles "
+            "WHERE is_crawled = 1 AND is_labeled = 0 "
+            "AND COALESCE(label_fail_count, 0) < ?"
+        )
         with self._connect() as conn:
             if limit is not None:
-                return conn.execute(
-                    "SELECT * FROM articles WHERE is_crawled = 1 AND is_labeled = 0 LIMIT ?",
-                    (limit,),
-                ).fetchall()
+                return conn.execute(sql + " LIMIT ?", (MAX_LABEL_ATTEMPTS, limit)).fetchall()
             else:
-                return conn.execute(
-                    "SELECT * FROM articles WHERE is_crawled = 1 AND is_labeled = 0"
-                ).fetchall()
+                return conn.execute(sql, (MAX_LABEL_ATTEMPTS,)).fetchall()
+
+    def count_label_giveups(self) -> int:
+        """試行回数上限に達してラベリングを諦めた記事の件数を返す"""
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM articles "
+                "WHERE is_crawled = 1 AND is_labeled = 0 "
+                "AND COALESCE(label_fail_count, 0) >= ?",
+                (MAX_LABEL_ATTEMPTS,),
+            ).fetchone()[0]
+
+    def mark_label_failed(self, article_id: int) -> int:
+        """ラベリング失敗を記録し、更新後の失敗回数を返す"""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE articles SET label_fail_count = COALESCE(label_fail_count, 0) + 1 "
+                "WHERE id = ?",
+                (article_id,),
+            )
+            return conn.execute(
+                "SELECT label_fail_count FROM articles WHERE id = ?", (article_id,)
+            ).fetchone()[0]
+
+    def reset_label_failures(self) -> int:
+        """
+        ラベリング失敗カウンタをリセットする（クリーナーやモデルを改修した後の再挑戦用）。
+
+        Returns:
+            リセットした件数
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE articles SET label_fail_count = 0 "
+                "WHERE COALESCE(label_fail_count, 0) > 0"
+            )
+            return conn.execute("SELECT changes()").fetchone()[0]
 
     def mark_crawled(self, article_id: int, content_path: str) -> None:
         """本文取得完了をマークする"""
@@ -128,7 +177,8 @@ class DbManager:
             conn.execute(
                 """
                 UPDATE articles
-                SET is_labeled = 1, anger = ?, sadness = ?, joy = ?, fear = ?, disgust = ?, surprise = ?
+                SET is_labeled = 1, anger = ?, sadness = ?, joy = ?, fear = ?, disgust = ?, surprise = ?,
+                    label_fail_count = 0
                 WHERE id = ?
                 """,
                 (anger, sadness, joy, fear, disgust, surprise, article_id),
@@ -141,13 +191,16 @@ class DbManager:
                 """
                 UPDATE articles
                 SET is_labeled = 0, anger = NULL, sadness = NULL,
-                    joy = NULL, fear = NULL, disgust = NULL, surprise = NULL
+                    joy = NULL, fear = NULL, disgust = NULL, surprise = NULL,
+                    label_fail_count = 0
                 WHERE is_labeled = 1
                 """
             )
             count = conn.execute(
                 "SELECT changes()"
             ).fetchone()[0]
+            # 再採点時は諦めた記事にも再挑戦させる
+            conn.execute("UPDATE articles SET label_fail_count = 0")
         return count
 
     def stats(self) -> dict:
