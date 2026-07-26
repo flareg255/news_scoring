@@ -33,9 +33,58 @@ class LlmLabeler:
 【ニュース記事】
 {text}"""
 
+    SCORE_KEYS = ("joy", "anger", "sadness", "fear", "disgust", "surprise")
+
+    # 思考モデルが出力する制御トークン（<|channel>thought ... や <think>...</think>）
+    THINK_BLOCK_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
+    CHANNEL_TOKEN_RE = re.compile(r'<\|?[a-z_]+\|?>')
+
     def __init__(self, api_url: str = LMSTUDIO_API_URL, model_name: str = LMSTUDIO_MODEL_NAME):
         self.api_url = api_url
         self.model_name = model_name
+
+    @classmethod
+    def _extract_scores(cls, response_text: str) -> dict | None:
+        """
+        AIの出力から感情スコアのJSONを取り出す。見つからなければ None を返す。
+        Markdownの装飾・思考トークン・前後の解説文が混ざっていても拾えるようにする。
+        """
+        text = cls.THINK_BLOCK_RE.sub('', response_text or '')
+        text = cls.CHANNEL_TOKEN_RE.sub('', text)
+
+        # 対応する括弧を数えながら {...} を切り出す（ネストしたJSONにも対応）
+        depth = 0
+        start = -1
+        for i, ch in enumerate(text):
+            if ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}' and depth > 0:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        candidate = json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        continue
+                    # 6感情のいずれかを含むオブジェクトだけを採用する
+                    found = cls._find_score_dict(candidate)
+                    if found is not None:
+                        return found
+        return None
+
+    @classmethod
+    def _find_score_dict(cls, obj) -> dict | None:
+        """dictを再帰的にたどり、感情キーを持つオブジェクトを探す（{"scores": {...}} 形式に対応）"""
+        if not isinstance(obj, dict):
+            return None
+        if any(k in obj for k in cls.SCORE_KEYS):
+            return obj
+        for value in obj.values():
+            found = cls._find_score_dict(value)
+            if found is not None:
+                return found
+        return None
 
     def label(self, text: str):
         """
@@ -61,26 +110,6 @@ class LlmLabeler:
         try:
             with urllib.request.urlopen(req, timeout=60) as response:
                 result = json.loads(response.read().decode("utf-8"))
-
-                actual_model = result.get("model", "unknown")
-                logger.info(f"確認済モデル: {actual_model}")
-
-                response_text = result["choices"][0]["message"]["content"]
-
-                match = re.search(r'\{[^{}]+\}', response_text, re.DOTALL)
-                if not match:
-                    raise json.decoder.JSONDecodeError("No JSON object found in response", response_text, 0)
-                cleaned_response = match.group(0)
-
-                scores = json.loads(cleaned_response)
-                return {
-                    "joy":      float(scores.get("joy", 0)),
-                    "anger":    float(scores.get("anger", 0)),
-                    "sadness":  float(scores.get("sadness", 0)),
-                    "fear":     float(scores.get("fear", 0)),
-                    "disgust":  float(scores.get("disgust", 0)),
-                    "surprise": float(scores.get("surprise", 0))
-                }, response_text
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8")
             logger.error(f"[LLMエラー] LM Studioがリクエストを拒否しました (HTTP {e.code}): {error_body}")
@@ -88,10 +117,29 @@ class LlmLabeler:
         except urllib.error.URLError as e:
             logger.error(f"[LLMエラー] LM Studioに接続できません ({self.api_url}): {e.reason}")
             return None, ""
-        except json.decoder.JSONDecodeError as e:
-            raw = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-            logger.error(f"[LLMエラー] AIの出力が不正なJSONでした: {e} | AIの生出力=''{raw[:200]}''")
-            return None, raw
         except Exception as e:
             logger.error(f"[LLMエラー] 予期せぬエラーが発生しました: {e}")
+            return None, ""
+
+        try:
+            actual_model = result.get("model", "unknown")
+            logger.info(f"確認済モデル: {actual_model}")
+
+            message = result["choices"][0]["message"]
+            response_text = message.get("content") or ""
+
+            scores = self._extract_scores(response_text)
+            if scores is None:
+                # 思考モデルは content が空で reasoning_content 側に本文を返すことがある
+                scores = self._extract_scores(message.get("reasoning_content") or "")
+
+            if scores is None:
+                logger.error(
+                    f"[LLMエラー] AIの出力からスコアJSONを取り出せませんでした | AIの生出力={response_text[:200]!r}"
+                )
+                return None, response_text
+
+            return {key: float(scores.get(key, 0)) for key in self.SCORE_KEYS}, response_text
+        except Exception as e:
+            logger.error(f"[LLMエラー] レスポンスの解釈に失敗しました: {e}")
             return None, ""

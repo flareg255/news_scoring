@@ -75,31 +75,42 @@ def phase1_label(relabel: bool = False):
         content_path = row["content_path"]
         if not content_path or not Path(content_path).exists():
             continue
-            
+
         with open(content_path, "r", encoding="utf-8") as f:
             raw_text = f.read()
-            
+
         # クリーニング実行
         cleaned_text = cleaner.clean(raw_text)
-        
+
+        # 空テキストをLLMに投げても「記事が入力されていません」と返るだけなので、
+        # API呼び出し前に失敗として打ち切る
+        if not cleaned_text.strip():
+            fails = db.mark_label_failed(row["id"])
+            logger.warning(f"ラベリング失敗 [ID:{row['id']}] クリーニング結果が空です（失敗{fails}回目） path={content_path}")
+            continue
+
         # APIモデルを呼び出し、感情スコアを取得 (生出力の raw_response は不要なので破棄)
         scores, _ = labeler.label(cleaned_text)
-        
+
         if scores is not None:
             # 取得したスコアをDBに保存し、is_labeled を 1 に更新
             db.mark_labeled(
-                row["id"], 
+                row["id"],
                 scores["anger"], scores["sadness"], scores["joy"],
                 scores["fear"], scores["disgust"], scores["surprise"]
             )
             count += 1
             logger.info(f"ラベリング成功 [ID:{row['id']}] 喜:{scores['joy']} 怒:{scores['anger']} 悲:{scores['sadness']} 恐:{scores['fear']} 嫌:{scores['disgust']} 驚:{scores['surprise']}")
         else:
-            logger.warning(f"ラベリング失敗 [ID:{row['id']}]")
-            
+            fails = db.mark_label_failed(row["id"])
+            logger.warning(f"ラベリング失敗 [ID:{row['id']}]（失敗{fails}回目）")
+
     logger.info(f"Phase 1 完了: {count} 件の記事に感情スコアを付与しました！")
     stats = db.stats()
+    giveups = db.count_label_giveups()
     logger.info(f"DB現在状況 → クロール済: {stats['crawled']}件 | ラベリング済: {stats['labeled']}件 | 未ラベリング: {stats['crawled'] - stats['labeled']}件")
+    if giveups:
+        logger.warning(f"試行回数上限に達しラベリングを諦めた記事: {giveups}件（再挑戦する場合は db.reset_label_failures() を実行）")
 
 
 def phase3_rag():
