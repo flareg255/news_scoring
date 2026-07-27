@@ -47,6 +47,12 @@ def setup(level: int = logging.DEBUG) -> None:
     file_handler.setFormatter(logging.Formatter(fmt, datefmt))
     root.addHandler(file_handler)
 
+    # 外部ライブラリの詳細ログを抑制する。
+    # openai SDKは内部でhttpxを使っており、APIコール1回ごとに
+    # "HTTP Request: POST ..." をINFOで出力してログが埋まるため。
+    for noisy in ("httpx", "httpcore", "openai"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     # 未捕捉の例外をログに記録する（stderrに消えるのを防ぐ）
     def _log_uncaught_exception(exc_type, exc_value, exc_traceback):
         if issubclass(exc_type, KeyboardInterrupt):

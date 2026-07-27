@@ -11,7 +11,6 @@ from src.logger import setup, get_logger
 from src.rss.rss_fetcher import RssFetcher
 from src.storage.db_manager import DbManager
 from src.crawler.article_crawler import ArticleCrawler
-from pathlib import Path
 from src.cleaner.text_cleaner import TextCleaner
 from src.labeling.llm_labeler import LlmLabeler
 from src.labeling.labeling_constants import LMSTUDIO_API_URL
@@ -72,12 +71,10 @@ def phase1_label(relabel: bool = False):
     
     count = 0
     for row in unlabeled_rows:
-        content_path = row["content_path"]
-        if not content_path or not Path(content_path).exists():
+        # 実体ファイルが無ければ月次アーカイブZIPから読む（保持期間切れの記事も再ラベル可能）
+        raw_text = db.read_article_text(row)
+        if raw_text is None:
             continue
-
-        with open(content_path, "r", encoding="utf-8") as f:
-            raw_text = f.read()
 
         # クリーニング実行
         cleaned_text = cleaner.clean(raw_text)
@@ -86,18 +83,19 @@ def phase1_label(relabel: bool = False):
         # API呼び出し前に失敗として打ち切る
         if not cleaned_text.strip():
             fails = db.mark_label_failed(row["id"])
-            logger.warning(f"ラベリング失敗 [ID:{row['id']}] クリーニング結果が空です（失敗{fails}回目） path={content_path}")
+            logger.warning(f"ラベリング失敗 [ID:{row['id']}] クリーニング結果が空です（失敗{fails}回目） path={row['content_path']}")
             continue
 
         # APIモデルを呼び出し、感情スコアを取得 (生出力の raw_response は不要なので破棄)
-        scores, _ = labeler.label(cleaned_text)
+        scores, _, model_name = labeler.label(cleaned_text)
 
         if scores is not None:
             # 取得したスコアをDBに保存し、is_labeled を 1 に更新
             db.mark_labeled(
                 row["id"],
                 scores["anger"], scores["sadness"], scores["joy"],
-                scores["fear"], scores["disgust"], scores["surprise"]
+                scores["fear"], scores["disgust"], scores["surprise"],
+                label_model=model_name
             )
             count += 1
             logger.info(f"ラベリング成功 [ID:{row['id']}] 喜:{scores['joy']} 怒:{scores['anger']} 悲:{scores['sadness']} 恐:{scores['fear']} 嫌:{scores['disgust']} 驚:{scores['surprise']}")

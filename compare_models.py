@@ -71,7 +71,7 @@ def score_model(model_name: str):
             continue
 
         text = text_path.read_text(encoding="utf-8").strip()
-        scores, _ = labeler.label(text)
+        scores, _, _ = labeler.label(text)
         results[str(article_id)] = scores
 
         if scores:
