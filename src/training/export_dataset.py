@@ -1,15 +1,19 @@
 """
 フェーズ2: 教師データエクスポートスクリプト
 
-SQLiteのラベリング済み記事と data/debug_cleaned/ のテキストを組み合わせ、
+SQLiteのラベリング済み記事とその本文を組み合わせ、
 LM Studio の Fine-tuning 機能が受け付ける JSONL 形式に変換して出力する。
+
+本文は data/raw の実体ファイル、無ければ月次アーカイブZIPから読み出し、
+ラベリング時と同じ TextCleaner を通す。これによりラベル付与に使われた
+テキストと、学習に渡すテキストが一致する。
 """
 
 import json
+from src.cleaner.text_cleaner import TextCleaner
 from src.storage.db_manager import DbManager
 from src.training.training_constants import (
     TRAIN_JSONL_PATH,
-    DEBUG_CLEANED_DIR,
     PROMPT_TEMPLATE,
 )
 from src.logger import get_logger
@@ -30,11 +34,11 @@ class DatasetExporter:
             エクスポートした件数
         """
         db = DbManager()
+        cleaner = TextCleaner()
 
         conn = db._connect()
         rows = conn.execute(
-            "SELECT id, joy, anger, sadness, fear, disgust, surprise "
-            "FROM articles WHERE is_labeled = 1"
+            "SELECT * FROM articles WHERE is_labeled = 1"
         ).fetchall()
         conn.close()
 
@@ -47,27 +51,23 @@ class DatasetExporter:
 
         with open(TRAIN_JSONL_PATH, "w", encoding="utf-8") as f:
             for row in rows:
-                article_id = row["id"]
-                cleaned_path = DEBUG_CLEANED_DIR / f"{article_id}.md"
-
-                if not cleaned_path.exists():
+                raw_text = db.read_article_text(row)
+                if raw_text is None:
                     skipped += 1
                     continue
 
-                text = cleaned_path.read_text(encoding="utf-8").strip()
+                text = cleaner.clean(raw_text).strip()
                 if not text:
                     skipped += 1
                     continue
 
                 prompt = PROMPT_TEMPLATE.format(text=text)
 
+                # DBはREALで保持しているが、プロンプトは「0〜10の整数」を要求しており
+                # モデルの実出力も整数なので、教師データも整数に揃える（7.0ではなく7）
                 completion = json.dumps({
-                    "joy":      row["joy"],
-                    "anger":    row["anger"],
-                    "sadness":  row["sadness"],
-                    "fear":     row["fear"],
-                    "disgust":  row["disgust"],
-                    "surprise": row["surprise"],
+                    key: int(row[key] or 0)
+                    for key in ("joy", "anger", "sadness", "fear", "disgust", "surprise")
                 }, ensure_ascii=False)
 
                 record = {"prompt": prompt, "completion": completion}
@@ -76,6 +76,6 @@ class DatasetExporter:
 
         logger.info(f"データセットエクスポート完了: {exported} 件 → {TRAIN_JSONL_PATH}")
         if skipped > 0:
-            logger.warning(f"debug_cleanedファイルが存在しないためスキップ: {skipped} 件")
+            logger.warning(f"本文を取得できずスキップ: {skipped} 件")
 
         return exported

@@ -1,7 +1,6 @@
 import json
 import re
-import urllib.request
-import urllib.error
+from openai import OpenAI, APIConnectionError, APIError
 from src.labeling.labeling_constants import LMSTUDIO_API_URL, LMSTUDIO_MODEL_NAME
 from src.logger import get_logger
 
@@ -39,9 +38,25 @@ class LlmLabeler:
     THINK_BLOCK_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
     CHANNEL_TOKEN_RE = re.compile(r'<\|?[a-z_]+\|?>')
 
+    # 接続不良時のリトライ回数（SDKが指数バックオフで再送する）
+    MAX_RETRIES = 2
+    TIMEOUT_SEC = 60.0
+
     def __init__(self, api_url: str = LMSTUDIO_API_URL, model_name: str = LMSTUDIO_MODEL_NAME):
         self.api_url = api_url
         self.model_name = model_name
+        # LM StudioはOpenAI互換APIなので公式SDKで叩ける。api_keyは検証されないがSDKが必須とするため入れる。
+        self.client = OpenAI(
+            base_url=self._to_base_url(api_url),
+            api_key="lm-studio",
+            timeout=self.TIMEOUT_SEC,
+            max_retries=self.MAX_RETRIES,
+        )
+
+    @staticmethod
+    def _to_base_url(api_url: str) -> str:
+        """設定値の .../v1/chat/completions から、SDKが要求する .../v1 までを取り出す"""
+        return api_url.split("/chat/completions")[0].rstrip("/")
 
     @classmethod
     def _extract_scores(cls, response_text: str) -> dict | None:
@@ -88,58 +103,48 @@ class LlmLabeler:
 
     def label(self, text: str):
         """
-        テキストを感情分析し、スコアとAIの生出力を返す。
+        テキストを感情分析し、スコアとAIの生出力、実際に応答したモデル名を返す。
 
         Returns:
-            (scores: dict | None, raw_response: str)
+            (scores: dict | None, raw_response: str, model_name: str)
         """
         prompt = self.PROMPT_TEMPLATE.format(text=text)
 
-        data = {
-            "model": self.model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.0
-        }
-
-        req = urllib.request.Request(
-            self.api_url,
-            data=json.dumps(data).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-
         try:
-            with urllib.request.urlopen(req, timeout=60) as response:
-                result = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8")
-            logger.error(f"[LLMエラー] LM Studioがリクエストを拒否しました (HTTP {e.code}): {error_body}")
-            return None, ""
-        except urllib.error.URLError as e:
-            logger.error(f"[LLMエラー] LM Studioに接続できません ({self.api_url}): {e.reason}")
-            return None, ""
+            result = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+            )
+        except APIConnectionError as e:
+            logger.error(f"[LLMエラー] LM Studioに接続できません ({self.api_url}): {e}")
+            return None, "", ""
+        except APIError as e:
+            logger.error(f"[LLMエラー] LM Studioがリクエストを拒否しました: {e}")
+            return None, "", ""
         except Exception as e:
             logger.error(f"[LLMエラー] 予期せぬエラーが発生しました: {e}")
-            return None, ""
+            return None, "", ""
 
         try:
-            actual_model = result.get("model", "unknown")
+            actual_model = result.model or "unknown"
             logger.info(f"確認済モデル: {actual_model}")
 
-            message = result["choices"][0]["message"]
-            response_text = message.get("content") or ""
+            message = result.choices[0].message
+            response_text = message.content or ""
 
             scores = self._extract_scores(response_text)
             if scores is None:
                 # 思考モデルは content が空で reasoning_content 側に本文を返すことがある
-                scores = self._extract_scores(message.get("reasoning_content") or "")
+                scores = self._extract_scores(getattr(message, "reasoning_content", None) or "")
 
             if scores is None:
                 logger.error(
                     f"[LLMエラー] AIの出力からスコアJSONを取り出せませんでした | AIの生出力={response_text[:200]!r}"
                 )
-                return None, response_text
+                return None, response_text, actual_model
 
-            return {key: float(scores.get(key, 0)) for key in self.SCORE_KEYS}, response_text
+            return {key: float(scores.get(key, 0)) for key in self.SCORE_KEYS}, response_text, actual_model
         except Exception as e:
             logger.error(f"[LLMエラー] レスポンスの解釈に失敗しました: {e}")
-            return None, ""
+            return None, "", ""

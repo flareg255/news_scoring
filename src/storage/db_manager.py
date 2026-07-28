@@ -49,7 +49,8 @@ class DbManager:
                     fear         REAL,
                     disgust      REAL,
                     surprise     REAL,
-                    label_fail_count INTEGER DEFAULT 0
+                    label_fail_count INTEGER DEFAULT 0,
+                    label_model  TEXT
                 )
             """)
 
@@ -60,6 +61,7 @@ class DbManager:
                 ("disgust", "REAL"),
                 ("surprise", "REAL"),
                 ("label_fail_count", "INTEGER DEFAULT 0"),
+                ("label_model", "TEXT"),
             ):
                 try:
                     conn.execute(f"ALTER TABLE articles ADD COLUMN {column} {ddl}")
@@ -160,6 +162,35 @@ class DbManager:
             )
             return conn.execute("SELECT changes()").fetchone()[0]
 
+    def read_article_text(self, row: sqlite3.Row) -> Optional[str]:
+        """
+        記事本文を読み出す。実体ファイルが無い場合は月次アーカイブZIPから取り出す。
+
+        archive_old_articles() は本文をZIP化して content_path を NULL にするため、
+        これが無いと保持期間を過ぎた記事は二度と再ラベリングできなくなる。
+
+        Returns:
+            本文テキスト。実体もアーカイブも見つからない場合は None
+        """
+        cpath = row["content_path"]
+        if cpath and os.path.exists(cpath):
+            with open(cpath, "r", encoding="utf-8") as f:
+                return f.read()
+
+        fetched_at = row["fetched_at"]
+        if not fetched_at:
+            return None
+
+        # ZIPは fetched_at の YYYY-MM 単位でまとめられ、中身は "<id>.md"
+        zip_path = self.db_path.parent / "archive" / f"{fetched_at[:7]}.zip"
+        if not zip_path.exists():
+            return None
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                return zf.read(f"{row['id']}.md").decode("utf-8", errors="replace")
+        except (KeyError, zipfile.BadZipFile, OSError):
+            return None
+
     def mark_crawled(self, article_id: int, content_path: str) -> None:
         """本文取得完了をマークする"""
         with self._connect() as conn:
@@ -170,18 +201,23 @@ class DbManager:
 
     def mark_labeled(
         self, article_id: int, anger: float, sadness: float, joy: float,
-        fear: float, disgust: float, surprise: float
+        fear: float, disgust: float, surprise: float, label_model: Optional[str] = None
     ) -> None:
-        """感情スコア付与完了をマークする"""
+        """
+        感情スコア付与完了をマークする。
+
+        label_model には実際に応答したモデル名を記録する。モデルを差し替えた際に
+        どの記事がどのモデルで採点されたかを後から追跡できるようにするため。
+        """
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE articles
                 SET is_labeled = 1, anger = ?, sadness = ?, joy = ?, fear = ?, disgust = ?, surprise = ?,
-                    label_fail_count = 0
+                    label_fail_count = 0, label_model = ?
                 WHERE id = ?
                 """,
-                (anger, sadness, joy, fear, disgust, surprise, article_id),
+                (anger, sadness, joy, fear, disgust, surprise, label_model, article_id),
             )
 
     def reset_labels(self) -> int:
