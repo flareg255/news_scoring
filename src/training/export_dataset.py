@@ -10,6 +10,8 @@ LM Studio の Fine-tuning 機能が受け付ける JSONL 形式に変換して�
 """
 
 import json
+from urllib.parse import urlparse
+
 from src.cleaner.text_cleaner import TextCleaner
 from src.storage.db_manager import DbManager
 from src.training.training_constants import (
@@ -19,6 +21,16 @@ from src.training.training_constants import (
 from src.logger import get_logger
 
 logger = get_logger(__name__)
+
+# 学習利用を利用規約で禁じている媒体。DBには記事が残っていても教師データには含めない。
+#
+# www.asahi.com: 朝日新聞デジタル利用規約 第10条(7)
+#   「データマイニング、ロボット等によるデータの収集、抽出、解析または蓄積等をする行為、
+#     並びにAI（機械学習モデルを含む）の開発・学習・改善・トレーニングその他これらに
+#     類する目的のために利用する行為」を、事前の書面による許可なく行うことを禁止。
+#
+# 判断の経緯は docs/DATA_COLLECTION_POLICY.md
+EXCLUDED_DOMAINS = frozenset({"www.asahi.com", "asahi.com", "digital.asahi.com"})
 
 
 class DatasetExporter:
@@ -48,9 +60,14 @@ class DatasetExporter:
 
         exported = 0
         skipped = 0
+        excluded = 0
 
         with open(TRAIN_JSONL_PATH, "w", encoding="utf-8") as f:
             for row in rows:
+                if urlparse(row["url"] or "").netloc in EXCLUDED_DOMAINS:
+                    excluded += 1
+                    continue
+
                 raw_text = db.read_article_text(row)
                 if raw_text is None:
                     skipped += 1
@@ -75,6 +92,8 @@ class DatasetExporter:
                 exported += 1
 
         logger.info(f"データセットエクスポート完了: {exported} 件 → {TRAIN_JSONL_PATH}")
+        if excluded > 0:
+            logger.info(f"学習利用を規約で禁じている媒体のため除外: {excluded} 件")
         if skipped > 0:
             logger.warning(f"本文を取得できずスキップ: {skipped} 件")
 
